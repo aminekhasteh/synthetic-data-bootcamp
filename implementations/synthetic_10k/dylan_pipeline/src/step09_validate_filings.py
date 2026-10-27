@@ -222,8 +222,9 @@ def extract_figures(text: str) -> tuple[list[tuple[float, str]], list[tuple[floa
             percents.extend((v, line) for v in line_percents)
 
     for match in PROSE_DOLLAR_RE.finditer(text):
-        # match.group(0) is e.g. "$5,825.6 million"; split off the trailing unit word.
-        amount_str, unit = match.group(0).rsplit(None, 1)
+        # match.group(0) is e.g. "$5,825.6 million"; split off the unit word, which
+        # real filings sometimes run on without a space ("$33.1billion").
+        amount_str, unit = match.group(0)[: match.start(1) - match.start(0)], match.group(1)
         value = to_float(amount_str)
         if value is not None:
             dollars.append((value * UNIT_SCALE[unit.lower()], match.group(0)))
