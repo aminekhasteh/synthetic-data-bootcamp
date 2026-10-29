@@ -11,7 +11,8 @@ broken copies of it, then says whether the metric reacted as expected:
 - fact_recall_at_10: the company's name blanked out of every chunk (should fall, since
   the questions name the company), and each question pasted into its gold chunk (an
   oracle: should reach about 1).
-- self_retrieval_mrr: every company given the same text (should fall to about 1/n).
+- self_retrieval_mrr: every company given the same text (should fall to chance, H(n)/n,
+  since the own chunk then ties with n identical ones).
 - vocab_jaccard: real filings split into two halves (should be high), and the set with
   every word spelled backwards (should be near 0).
 - cross_doc_overlap: every company given the same text (should be 1).
@@ -207,6 +208,7 @@ def run_controls(companies: list, real: RealItems, seed: int) -> list[dict]:
         same = [(c.company_id, c.name, docs[0][1]) for c, _ in docs]
         mrr = self_retrieval_mrr([(c.company_id, c.name, t) for c, t in docs], seed)
         mrr_same = self_retrieval_mrr(same, seed)
+        chance = sum(1 / k for k in range(1, len(docs) + 1)) / len(docs)  # mean 1/rank among n ties
         check(rows, "self_retrieval_mrr", item, "as generated", mrr, "", None)
         check(
             rows,
@@ -214,8 +216,8 @@ def run_controls(companies: list, real: RealItems, seed: int) -> list[dict]:
             item,
             "every company same text",
             mrr_same,
-            f"<= {2 / len(docs):.2f} (about 1/n)",
-            mrr_same is not None and mrr_same <= 2 / len(docs),
+            f"<= {1.2 * chance:.2f} (chance: own chunk tied with n copies)",
+            mrr_same is not None and mrr_same <= 1.2 * chance,
         )
 
         real_texts = list(real.texts[item].values())
