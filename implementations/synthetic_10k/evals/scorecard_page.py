@@ -277,7 +277,7 @@ def set_table(order: list[str], heads: list[tuple[str, str]], values, best: dict
         tds = []
         for key, _ in heads:
             classes = ["num"] + (["best"] if name != REAL and best.get(key) == name else [])
-            tds.append(f'<td class="{" ".join(classes)}">{cell(values(name, key))}</td>')
+            tds.append(f'<td class="{" ".join(classes)}">{cell_text(values(name, key))}</td>')
         cls = ' class="real-col"' if name == REAL else ""
         body.append(f'<tr{cls}><th scope="row">{html.escape(method)} · {html.escape(model)}</th>{"".join(tds)}</tr>')
     return f"""<div class="scroll"><table class="grid wide">
