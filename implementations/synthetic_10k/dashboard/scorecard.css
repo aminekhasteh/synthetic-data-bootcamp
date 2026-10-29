@@ -89,4 +89,13 @@ dl.defs dt { font-weight: 600; font-size: 14px; }
 dl.defs dd { margin: 2px 0 0; font-size: 13.5px; color: var(--muted); }
 code { font-family: var(--f-mono); font-size: 12.5px; }
 footer { font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--rule); padding-top: 16px; display: flex; flex-direction: column; gap: 6px; }
-.back { display: flex; flex-wrap: wrap; gap: 8px; } .back a { font-family: var(--f-mono); font-size: 12px; color: var(--muted); text-decoration: none; border: 1px solid var(--rule); border-radius: 999px; padding: 4px 12px; } .back a:hover { color: var(--fg); border-color: var(--rule-strong); }
+nav.sitenav { display: flex; gap: 2px; flex-wrap: wrap; border-bottom: 1px solid var(--rule); margin: 0 0 18px; }
+nav.sitenav a { font-family: var(--f-mono); font-size: 12px; font-weight: 600; color: var(--muted); text-decoration: none; padding: 8px 14px 7px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+nav.sitenav a:hover { color: var(--fg); }
+nav.sitenav a[aria-current="page"] { color: var(--fg); border-bottom-color: var(--rule-strong); }
+table.defs-table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+table.defs-table th, table.defs-table td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--rule); }
+table.defs-table thead th { font-family: var(--f-mono); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+table.defs-table td.dname { font-weight: 600; white-space: nowrap; }
+table.defs-table td.ddir { font-family: var(--f-mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+table.defs-table tr.grp td { padding-top: 16px; }

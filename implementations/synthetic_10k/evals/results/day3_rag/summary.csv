@@ -1,8 +1,8 @@
-set,n_questions,rag_answer_correct_pct,rag_abstain_pct,retrieval_hit_pct
-real,177,29.4,67.2,27.7
-m1_gemini,200,63.5,36.5,62.5
-m2_gemini,186,67.7,32.3,61.3
-m1_gpt4o,200,77.5,22.5,78.0
-m2_gpt4o,186,75.3,24.7,66.7
-m1_opus,200,62.0,38.0,60.0
-m2_opus,90,80.0,20.0,76.7
+set,n_questions,rag_answer_correct_pct,rag_abstain_pct,retrieval_hit_pct,rag_fact_correct_pct,rag_analytical_correct_pct,retrieval_hit_fact_pct,retrieval_hit_analytical_pct
+real,281,22.8,74.7,23.1,29.9,10.6,27.7,15.4
+m1_gemini,317,55.5,44.2,54.6,64.0,41.0,62.5,41.0
+m2_gemini,306,53.6,46.4,50.0,68.3,30.8,61.3,32.5
+m1_gpt4o,317,68.1,31.9,67.8,79.0,49.6,78.0,50.4
+m2_gpt4o,306,61.1,38.2,55.9,75.3,39.2,66.7,39.2
+m1_opus,317,56.2,43.8,54.3,62.5,45.3,60.0,44.4
+m2_opus,150,75.3,24.7,58.0,80.0,68.3,76.7,30.0
