@@ -268,7 +268,7 @@ def best_by(rows: list[dict], metric: str, direction: str) -> str | None:
     return (max(scored) if direction == "high" else min(scored))[1]
 
 
-def set_table(order: list[str], heads: list[tuple[str, str]], values, best: dict[str, str]) -> str:
+def set_table(order: list[str], heads: list[tuple[str, str]], values, best: dict[str, str | None]) -> str:
     """A table with one row per set: `values(name, key)` gives each cell."""
     th = "".join(f'<th class="num">{html.escape(h)}</th>' for _, h in heads)
     body = []
