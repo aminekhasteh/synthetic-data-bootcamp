@@ -15,7 +15,7 @@ Metrics per set (summary.csv):
   rag_fact_correct_pct / rag_analytical_correct_pct for each kind.
 - rag_abstain_pct: share the model said it couldn't answer from the passages.
 - retrieval_hit_pct: share whose answer the top K make available (qa.fact_questions.hit:
-  a passage stating it, or for a ratio a passage for each input).
+  a passage stating it, or for a ratio a passage for each input figure).
 
 Real filings get the same questions from their XBRL figures, over the same random
 sample the scorecard uses (--real-sample, --seed).

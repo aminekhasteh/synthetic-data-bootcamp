@@ -113,8 +113,8 @@ DEFINITIONS = [
         "Retrieval, whole filing (BM25, no LLM)",
         "Analytical answerable",
         "",
-        "Share of analytical questions the filing makes answerable: the ratio itself is stated, or both input figures "
-        "are (each in some passage).",
+        "Share of analytical questions the filing makes answerable: both input figures are stated (each in some "
+        "passage). A passage giving the ratio itself isn't counted: a percentage that close turns up by chance.",
     ),
     (
         "Retrieval, whole filing (BM25, no LLM)",
@@ -122,7 +122,7 @@ DEFINITIONS = [
         "high",
         "BM25 keyword search over every passage of the set (each indexed with its company, fiscal year and Item), "
         "the question as the query. A question is hit when the top 10 passages contain its answer: a passage stating "
-        "the value, or for an analytical question the ratio or a passage for each input. Every question counts, so "
+        "the value, or for an analytical question a passage for each input figure. Every question counts, so "
         "unanswerable ones are misses and recall can't exceed answerable.",
     ),
     (

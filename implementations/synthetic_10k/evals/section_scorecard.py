@@ -36,7 +36,7 @@ the set measures)
   income). Real filings get the same questions from their XBRL figures.
 - qa_recall_at_10 (higher), and fact_ / analytical_recall_at_10: BM25 over all of
   the set's chunks; a question is hit when its answer's chunk is in the top 10 (for
-  an analytical question, the ratio's chunk or a chunk for each input figure). Every
+  an analytical question, a chunk for each input figure). Every
   question counts, so a set that never states a fact scores a miss on it.
 - qa_coverage, fact_ / analytical_coverage (shown, not ranked): share of questions
   answerable from the filing at all; recall can't exceed it.

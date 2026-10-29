@@ -16,13 +16,13 @@ Per question this records the true value and the chunks that make it answerable 
 same figure matching as method_2.step09's numeric gate: dollars within 1%, percentages
 within 0.25 points):
 - a fact question: every chunk whose text states the value (gold_chunk_ids);
-- an analytical question: every chunk stating the ratio itself (gold_chunk_ids), and
-  per input figure every chunk stating it (input_gold_chunk_ids, groups split by
-  "|"). It is answerable when the ratio is stated or every input is.
+- an analytical question: per input figure, every chunk stating it
+  (input_gold_chunk_ids, groups split by "|"); gold_chunk_ids is empty. It is
+  answerable when every input is stated. A chunk "stating the ratio" isn't used: a
+  percentage within 0.25 points of a ratio turns up by chance in most filings.
 A question with nothing answerable is unanswerable from the corpus. hit() is the one
 retrieval rule every caller uses: a fact question is hit when a stating chunk is in
-the retrieved list; an analytical one when the ratio's chunk is, or a chunk for every
-input is.
+the retrieved list; an analytical one when a chunk for every input is.
 
 Scores, for a list of questions and the chunks they are searched over (score()):
 - fact_coverage / analytical_coverage / qa_coverage: share of the fact, analytical
@@ -325,9 +325,8 @@ def make_questions(
         value = analytical_value(facts, numerator, denominator)
         if value is None:
             continue
-        direct = stating_chunks(value, chunks, is_percent=True)
         inputs = "|".join(";".join(gold_by_fact.get(f, [])) for f in (numerator, denominator))
-        rows.append(row("analytical", key, template.format(name=name, fy=fy), value, True, direct, inputs))
+        rows.append(row("analytical", key, template.format(name=name, fy=fy), value, True, [], inputs))
     return rows
 
 
