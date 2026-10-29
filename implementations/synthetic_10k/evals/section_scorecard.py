@@ -1,8 +1,11 @@
-r"""Score each 10-K section separately, so a method can be chosen per section.
+r"""Score every synthetic set against real 10-Ks: retrieval over the whole filing, and
+the text metrics section by section.
 
-For every synthetic set (a folder of filings from either method) and every Item
-(1, 1A, 1C, 7, 8) this writes one row of metrics, next to the same metrics on real
-10-Ks. It needs no API calls: retrieval is BM25 only, so it runs anywhere.
+For every synthetic set (a folder of filings from either method) this writes one
+"all" row of retrieval metrics over the whole filing (a RAG system searches every
+section at once, so splitting retrieval by section says little) and one row of text
+metrics per Item (1, 1A, 1C, 7, 8), next to the same metrics on real 10-Ks. It needs
+no API calls: retrieval is BM25 only, so it runs anywhere.
 
 Metrics, with the direction that counts as better:
 
@@ -23,21 +26,23 @@ Figure accuracy (text-to-table consistency)
   MIN_FIGURES_PER_DOC figures per filing on average, since a share of almost nothing
   says nothing (a set that writes no figures would otherwise score 100%).
 
-Retrieval utility (what a RAG benchmark built on the set measures)
-- fact_recall_at_10 (higher): the shared bank of ten standard fact questions per
-  company (qa.fact_questions: revenue, net income, operating income, total assets,
-  total liabilities, equity, cash, operating cash flow, net and operating margin),
-  asked of every set the same way. BM25 over this Item's chunks; a question counts
-  as a hit when a chunk stating its answer is in the top 10. Every question counts,
-  so the denominator is fixed (10 x companies) and a set that never states a fact
-  scores a miss on it. Real filings get the same questions from their XBRL figures
-  (operating cash flow isn't in the XBRL extract, so nine per filing).
-- fact_coverage (shown, not ranked): share of those questions whose answer is
-  stated anywhere in this Item; recall@10 can't exceed it. The "all" rows score the
-  whole filing.
+Retrieval utility, whole filing only (the "all" rows; what a RAG benchmark built on
+the set measures)
+- The shared question bank (qa.fact_questions), asked of every set the same way:
+  ten fact questions per company (revenue, net income, operating income, total
+  assets, total liabilities, equity, cash, operating cash flow, net and operating
+  margin) and six analytical ones (return on equity and on assets, liabilities and
+  cash as a share of assets, operating cash flow as a share of revenue and of net
+  income). Real filings get the same questions from their XBRL figures.
+- qa_recall_at_10 (higher), and fact_ / analytical_recall_at_10: BM25 over all of
+  the set's chunks; a question is hit when its answer's chunk is in the top 10 (for
+  an analytical question, the ratio's chunk or a chunk for each input figure). Every
+  question counts, so a set that never states a fact scores a miss on it.
+- qa_coverage, fact_ / analytical_coverage (shown, not ranked): share of questions
+  answerable from the filing at all; recall can't exceed it.
 - self_retrieval_mrr (closer to real): a sentence from each chunk, with the company's
-  name removed, is the query; MRR of finding its own chunk among all chunks of this
-  Item. Low means passages repeat across companies; real filings set the target.
+  name removed, is the query; MRR of finding its own chunk among all of the set's
+  chunks. Low means passages repeat across companies; real filings set the target.
 
 Realism (fidelity)
 - length_ratio (closer to 1): median words over the real median for the Item.
@@ -50,8 +55,9 @@ Diversity and privacy
 - copied_from_real (at or below real): median share of 8-word sequences found in the
   same Item of the real corpus. Real column: a held-out sample against the others.
 
-The summary picks a suggested method per Item by a weighted rank (see WEIGHTS):
-fact_correct_pct and fact_recall_at_10 count twice. traced_pct is no longer ranked:
+The summary picks a suggested method per Item by a weighted rank of the text metrics
+(see WEIGHTS; fact_correct_pct counts twice), and shades the best set per retrieval
+metric in the whole-filing table (WHOLE_WEIGHTS). traced_pct is no longer ranked:
 any percentage within 0.25 points of ~100 allowed values passes, so a random
 percentage traces about a quarter of the time, and it ignores what the figure is
 labelled as. Comparisons for self-retrieval
@@ -59,8 +65,8 @@ and cross-document overlap use a real sample of the same size as each set, since
 both depend on corpus size.
 
 Output, under --out (default evals/results/section_scorecard/): scorecard.csv (one
-row per set and Item, plus the real rows), scorecard.md (one table per Item and the
-suggested pick).
+row per set and Item plus an "all" row per set, and the real rows), scorecard.md (the
+whole-filing table, one table per Item and the suggested pick).
 
 Run from implementations/synthetic_10k, in the repo's uv environment:
     uv run python -m evals.section_scorecard
@@ -84,7 +90,6 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 
 import numpy as np  # noqa: E402
-from method_1.financials import DURATION_METRICS, INSTANT_METRICS  # noqa: E402
 from method_2.step09_validate_filings import (  # noqa: E402
     UNIVERSAL_PERCENTS,
     build_expected_figures,
@@ -94,6 +99,7 @@ from method_2.step09_validate_filings import (  # noqa: E402
 from method_2.utils import setup_logging, write_atomic  # noqa: E402
 from qa.fact_questions import (  # noqa: E402
     correctness,
+    load_xbrl_metrics,
     make_questions,
     real_facts,
     synthetic_facts,
@@ -131,18 +137,33 @@ MIN_ATTACHED = 5  # below this many label-attached figures in an Item, fact_corr
 REAL = "real"
 # metric -> (weight, direction): "high" = higher is better, "real" = closer to the real
 # value is better, "le_real" = at or below the real value is best, then closer to it.
+# Per-Item text metrics.
 WEIGHTS = {
     "fact_correct_pct": (2, "high"),
-    "fact_recall_at_10": (2, "high"),
-    "self_retrieval_mrr": (1, "real"),
     "length_ratio": (1, "one"),
     "vocab_jaccard": (1, "high"),
     "figures_per_1k": (1, "real"),
     "cross_doc_overlap": (1, "le_real"),
     "copied_from_real": (1, "le_real"),
 }
-INFO = ["n_docs", "median_words", "n_figures", "n_questions", "fact_coverage", "n_attached", "traced_pct"]
-COLUMNS = ["set", "item", *INFO, *WEIGHTS]
+# Whole-filing retrieval metrics (the "all" rows).
+WHOLE_WEIGHTS = {
+    "qa_recall_at_10": (2, "high"),
+    "fact_recall_at_10": (1, "high"),
+    "analytical_recall_at_10": (1, "high"),
+    "self_retrieval_mrr": (1, "real"),
+    "fact_correct_pct": (1, "high"),
+}
+INFO = ["n_docs", "median_words", "n_figures", "n_attached", "traced_pct"]
+WHOLE_INFO = [
+    "n_questions",
+    "n_fact_questions",
+    "n_analytical_questions",
+    "qa_coverage",
+    "fact_coverage",
+    "analytical_coverage",
+]
+COLUMNS = list(dict.fromkeys(["set", "item", *INFO, *WEIGHTS, *WHOLE_INFO, *WHOLE_WEIGHTS]))
 ALL = "all"  # item value of the whole-filing fact-question rows
 ITEM_LABELS = {
     "1": "Item 1 Business",
@@ -210,24 +231,6 @@ REAL_ASSET_RATIO_METRICS = [
 ]
 
 
-def load_real_metrics(financials_csv: Path) -> dict[tuple[str, int], dict[str, float]]:
-    """Return every XBRL metric in Method 1's financials.csv, per (ticker, fiscal year)."""
-    out: dict[tuple[str, int], dict[str, float]] = {}
-    if not financials_csv.exists():
-        logger.warning("No %s; real filings get no figures traced", financials_csv)
-        return out
-    with open(financials_csv, encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            metrics = {}
-            for m in [*DURATION_METRICS, *INSTANT_METRICS]:
-                try:
-                    metrics[m] = float(row[m])
-                except (KeyError, TypeError, ValueError):
-                    continue
-            out[(row["ticker"], int(row["fiscal_year"]))] = metrics
-    return out
-
-
 def real_expected_figures(current: dict[str, float], prior: dict[str, float]) -> tuple[set[float], set[float]]:
     """Return (dollars, percents) a real filing can cite from its XBRL headline figures.
 
@@ -288,14 +291,11 @@ def query_sentence(text: str, name_tokens: set[str], rng: random.Random) -> str 
     return " ".join(words)
 
 
-def self_retrieval_mrr(docs: list[tuple[str, str, str]], seed: int) -> float | None:
-    """Return the MRR of finding a chunk from one of its own sentences."""
-    chunks = [
-        (f"{doc_id}_{i}", name, para)
-        for doc_id, name, text in docs
-        for i, para in enumerate(text.split("\n\n"))
-        if para.strip()
-    ]
+def self_retrieval_mrr(docs: list[tuple[str, str, list[str]]], seed: int) -> float | None:
+    """Return the MRR of finding a chunk from one of its own sentences, over every
+    (doc_id, company name, chunk texts) doc's chunks.
+    """
+    chunks = [(f"{doc_id}_{i}", name, para) for doc_id, name, paras in docs for i, para in enumerate(paras)]
     if len(chunks) < 2:
         return None
     bm25 = Bm25Retriever([c[0] for c in chunks], [c[2] for c in chunks])
@@ -360,21 +360,36 @@ class RealItems:
         return float(np.isin(h, self.index[item]).mean()) if len(h) else 0.0
 
 
-def fact_cells(questions: list[dict], chunks: list[Chunk], correct: int, attached: int) -> dict:
-    """The fact-question and fact-correctness cells of one row."""
-    scores = fact_score(questions, chunks)
+def correct_cells(correct: int, attached: int) -> dict:
+    """The fact-correctness cells of one row."""
     return {
-        "n_questions": scores["n_questions"],
-        "fact_coverage": scores["fact_coverage"],
-        "fact_recall_at_10": scores["fact_recall_at_10"],
         "n_attached": attached,
         "fact_correct_pct": round(correct / attached * 100, 1) if attached >= MIN_ATTACHED else None,
     }
 
 
-def all_row(name: str, n_docs: int, questions: list[dict], chunks: list[Chunk], correct: int, attached: int) -> dict:
-    """The whole-filing row: the fact questions over every chunk of the set."""
-    return {"set": name, "item": ALL, "n_docs": n_docs, **fact_cells(questions, chunks, correct, attached)}
+def all_row(
+    name: str,
+    n_docs: int,
+    questions: list[dict],
+    chunks: list[Chunk],
+    correct: int,
+    attached: int,
+    seed: int,
+) -> dict:
+    """The whole-filing row: the question bank and self-retrieval over every chunk of the set."""
+    by_company: dict[str, list[Chunk]] = {}
+    for c in chunks:
+        by_company.setdefault(c.ticker, []).append(c)
+    docs = [(ticker, cs[0].company_name, [c.text for c in cs]) for ticker, cs in by_company.items()]
+    return {
+        "set": name,
+        "item": ALL,
+        "n_docs": n_docs,
+        **fact_score(questions, chunks),
+        "self_retrieval_mrr": self_retrieval_mrr(docs, seed),
+        **correct_cells(correct, attached),
+    }
 
 
 def set_rows(name: str, companies: list[Company], real: RealItems, seed: int) -> list[dict]:
@@ -415,8 +430,7 @@ def set_rows(name: str, companies: list[Company], real: RealItems, seed: int) ->
                 "median_words": round(statistics.median(words)),
                 "n_figures": total,
                 "traced_pct": round(traced / total * 100, 1) if total >= MIN_FIGURES_PER_DOC * len(docs) else None,
-                **fact_cells(questions, [ch for ch in chunks if ch.item == item], correct, attached),
-                "self_retrieval_mrr": self_retrieval_mrr([(c.company_id, c.name, t) for c, t in docs], seed),
+                **correct_cells(correct, attached),
                 "length_ratio": round(statistics.median(words) / real_words, 2) if real_words else None,
                 "vocab_jaccard": round(
                     len(top_terms([t for _, t in docs]) & real.terms[item])
@@ -435,7 +449,7 @@ def set_rows(name: str, companies: list[Company], real: RealItems, seed: int) ->
                 else None,
             },
         )
-    rows.append(all_row(name, len(companies), questions, chunks, all_correct, all_attached))
+    rows.append(all_row(name, len(companies), questions, chunks, all_correct, all_attached, seed))
     return rows
 
 
@@ -491,8 +505,7 @@ def real_rows(
                 "traced_pct": round(traced / total * 100, 1)
                 if traced_docs and total >= MIN_FIGURES_PER_DOC * traced_docs
                 else None,
-                **fact_cells(questions, [ch for ch in chunks if ch.item == item], correct, attached),
-                "self_retrieval_mrr": self_retrieval_mrr([(f.ticker, f.name, t) for f, t in docs], seed),
+                **correct_cells(correct, attached),
                 "length_ratio": 1.0,
                 "vocab_jaccard": 1.0,
                 "figures_per_1k": round(fig, 2) if (fig := real.figures_per_1k.get(item)) is not None else None,
@@ -501,14 +514,14 @@ def real_rows(
             },
         )
         all_correct, all_attached = all_correct + correct, all_attached + attached
-    rows.append(all_row(label, len(sample), questions, chunks, all_correct, all_attached))
+    rows.append(all_row(label, len(sample), questions, chunks, all_correct, all_attached, seed))
     return rows
 
 
-def pick(rows: list[dict], real_row: dict | None) -> tuple[str | None, dict[str, str]]:
-    """Return the suggested set for one Item and the best set per metric."""
+def pick(rows: list[dict], real_row: dict | None, weights: dict = WEIGHTS) -> tuple[str | None, dict[str, str]]:
+    """Return the suggested set for one Item (or the whole filing) and the best set per metric."""
     best, points = {}, Counter()
-    for metric, (weight, direction) in WEIGHTS.items():
+    for metric, (weight, direction) in weights.items():
         target = real_row.get(metric) if real_row else None
         scored = []
         for r in rows:
@@ -541,16 +554,33 @@ def fmt(v) -> str:
 
 
 def markdown(rows: list[dict], set_names: list[str]) -> str:
-    """Render the per-Item tables and the suggested picks."""
+    """Render the whole-filing table, the per-Item tables and the suggested picks."""
+    whole = [r for r in rows if r["item"] == ALL and r["set"] in set_names]
+    real_whole = next((r for r in rows if r["item"] == ALL and r["set"] == REAL), None)
+    _, whole_best = pick(whole, real_whole, WHOLE_WEIGHTS)
+    whole_metrics = ["n_docs", *WHOLE_INFO, *WHOLE_WEIGHTS, "n_attached"]
     lines = [
-        "# Per-section scorecard",
+        "# Scorecard",
         "",
-        "One table per Item. `real` is the same measure on real 10-Ks (for self-retrieval and cross-document overlap, a real sample of the same size as the sets). See `evals/section_scorecard.py` for each metric.",
+        "`real` is the same measure on real 10-Ks (for self-retrieval and cross-document overlap, a real sample of the same size as the sets). See `evals/section_scorecard.py` for each metric.",
+        "",
+        "## Whole filing: question bank and retrieval",
+        "",
+        "Ten fact and six analytical questions per company, the same for every set (qa/fact_questions.py), over all of a filing's chunks. Bold = best set on that metric.",
+        "",
+        "| Set | " + " | ".join(whole_metrics) + " |",
+        "|---" * (len(whole_metrics) + 1) + "|",
+    ]
+    for r in [*whole, *([real_whole] if real_whole else [])]:
+        cells = [fmt(r.get(m)) for m in whole_metrics]
+        cells = [f"**{c}**" if whole_best.get(m) == r["set"] and c else c for m, c in zip(whole_metrics, cells)]
+        lines.append(f"| {r['set']} | " + " | ".join(cells) + " |")
+    lines += [
         "",
         "## Suggested method per section",
         "",
-        "| Item | Suggested set | Best figure accuracy | Best retrieval utility |",
-        "|---|---|---|---|",
+        "| Item | Suggested set | Most numbers correct |",
+        "|---|---|---|",
     ]
     tables = []
     for item in ITEMS:
@@ -559,9 +589,7 @@ def markdown(rows: list[dict], set_names: list[str]) -> str:
             continue
         real_row = next((r for r in rows if r["item"] == item and r["set"] == REAL), None)
         suggested, best = pick(item_rows, real_row)
-        lines.append(
-            f"| {ITEM_LABELS[item]} | {suggested or ''} | {best.get('fact_correct_pct', '')} | {best.get('fact_recall_at_10', '')} |",
-        )
+        lines.append(f"| {ITEM_LABELS[item]} | {suggested or ''} | {best.get('fact_correct_pct', '')} |")
         shown = [*item_rows, *([real_row] if real_row else [])]
         tables += [
             "",
@@ -576,19 +604,9 @@ def markdown(rows: list[dict], set_names: list[str]) -> str:
                 cell = fmt(r.get(metric))
                 cells.append(f"**{cell}**" if best.get(metric) == r["set"] and cell else cell)
             tables.append(f"| {metric} | " + " | ".join(cells) + " |")
-    whole = [r for r in rows if r["item"] == ALL and r["set"] in [*set_names, REAL]]
-    fact_metrics = ["n_docs", "n_questions", "fact_coverage", "fact_recall_at_10", "n_attached", "fact_correct_pct"]
     lines += [
         "",
-        "Suggested set = highest weighted rank across the metrics (fact correctness and fact retrieval count twice). Bold = best set on that metric.",
-        "",
-        "## Whole filing: standard fact questions",
-        "",
-        "Ten questions per company, the same for every set (qa/fact_questions.py), over all of a filing's chunks.",
-        "",
-        "| Set | " + " | ".join(fact_metrics) + " |",
-        "|---" * (len(fact_metrics) + 1) + "|",
-        *(f"| {r['set']} | " + " | ".join(fmt(r.get(m)) for m in fact_metrics) + " |" for r in whole),
+        "Suggested set = highest weighted rank across the text metrics (numbers correct counts twice). Bold = best set on that metric.",
         *tables,
     ]
     return "\n".join(lines) + "\n"
@@ -634,7 +652,7 @@ def main() -> None:
     sample = [(f, by_key.get((f.ticker, f.fiscal_year), {})) for f in sample_filings]
     real = RealItems(filings, holdout={(f.ticker, f.fiscal_year) for f in sample_filings})
 
-    rows = real_rows(sample, real, args.seed, REAL, load_real_metrics(args.real_financials))
+    rows = real_rows(sample, real, args.seed, REAL, load_xbrl_metrics(args.real_financials))
     for name, cs in companies.items():
         logger.info("Scoring %s (%d companies)", name, len(cs))
         rows += set_rows(name, cs, real, args.seed)

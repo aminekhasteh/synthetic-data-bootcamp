@@ -1,17 +1,21 @@
-r"""End-to-end RAG answers to the shared fact questions, per set.
+r"""End-to-end RAG answers to the shared question bank, per set.
 
-For each set, every company's ten standard questions (qa.fact_questions, the same
-bank the scorecard uses) go through the RAG chatbot's pipeline: hybrid retrieval
-(BM25 + semantic embeddings, fused by reciprocal rank) over all of the set's chunks,
-then an LLM answers from the top 10 passages only. The answer is scored against the
-company's statements with the same tolerance as the scorecard (dollars within 1%,
-percentages within 0.25 points). Every question counts, so a set whose filings never
-state a fact scores a miss on it.
+For each set, every company's questions (qa.fact_questions: ten fact and six
+analytical, the same bank the scorecard uses) go through the RAG chatbot's pipeline:
+retrieval over all of the set's chunks (hybrid BM25 + semantic embeddings fused by
+reciprocal rank, or BM25 alone with --retriever bm25), then an LLM answers from the
+top 10 passages only, computing a ratio from the figures they state when the
+question asks for one. The answer is scored against the company's statements
+(qa.fact_questions.answer_ok: dollars within 1%, percentages within 0.25 points, a
+computed ratio within 0.5 points or 2%). Every question counts, so a set whose
+filings never state a fact scores a miss on it.
 
 Metrics per set (summary.csv):
-- rag_answer_correct_pct: share of questions answered with the true value.
+- rag_answer_correct_pct: share of all questions answered with the true value, and
+  rag_fact_correct_pct / rag_analytical_correct_pct for each kind.
 - rag_abstain_pct: share the model said it couldn't answer from the passages.
-- retrieval_hit_pct: share with a passage stating the answer in the top K.
+- retrieval_hit_pct: share whose answer the top K make available (qa.fact_questions.hit:
+  a passage stating it, or for a ratio a passage for each input).
 
 Real filings get the same questions from their XBRL figures, over the same random
 sample the scorecard uses (--real-sample, --seed).
@@ -38,9 +42,16 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 
 from method_1.narrative import UsageClient  # noqa: E402
-from method_2.step09_validate_filings import closest_match  # noqa: E402
 from method_2.utils import setup_logging  # noqa: E402
-from qa.fact_questions import contextual, make_questions, real_facts, synthetic_facts  # noqa: E402
+from qa.fact_questions import (  # noqa: E402
+    answer_ok,
+    contextual,
+    hit,
+    load_xbrl_metrics,
+    make_questions,
+    real_facts,
+    synthetic_facts,
+)
 from RAG.chunks import Chunk  # noqa: E402
 from RAG.retrieval import Bm25Retriever, SemanticRetriever, reciprocal_rank_fusion  # noqa: E402
 
@@ -53,7 +64,6 @@ from evals.compare_sets import (  # noqa: E402
     load_real_records,
     load_set,
 )
-from evals.section_scorecard import load_real_metrics  # noqa: E402
 
 
 logger = setup_logging("rag_answers")
@@ -64,8 +74,9 @@ SYSTEM_PROMPT = (
     "You answer questions about companies using only the 10-K passages provided. "
     'Reply with JSON only: {"value": <number or null>, "unit": "usd" | "percent"}. '
     "Give dollar amounts in full US dollars (e.g. 1250000000 for $1.25 billion) and "
-    "percentages as a number of percent (e.g. 12.5). If the passages don't state the "
-    'answer, reply {"value": null}.'
+    "percentages as a number of percent (e.g. 12.5). If the question asks for a ratio, "
+    "compute it from the figures the passages state. If the passages don't give what "
+    'the answer needs, reply {"value": null}.'
 )
 
 
@@ -109,7 +120,6 @@ def answer_all(
     def one(q: dict) -> dict:
         rankings = [bm25.rank(q["question"])] + ([semantic.rank(q["question"])] if semantic else [])
         fused = reciprocal_rank_fusion(rankings)[:TOP_K]
-        gold = set(filter(None, q["gold_chunk_ids"].split(";")))
         prompt = f"Question: {q['question']}\n\nPassages:\n{format_context([by_id[c] for c in fused])}"
         try:
             reply = client.chat(SYSTEM_PROMPT, prompt, max_tokens=200).text
@@ -119,10 +129,10 @@ def answer_all(
         value = parse_answer(reply)
         return {
             "set": name,
-            **{k: q[k] for k in ("company_id", "fact", "question", "answer", "is_percent")},
-            "retrieval_hit": bool(gold & set(fused)),
+            **{k: q[k] for k in ("company_id", "style", "fact", "question", "answer", "is_percent")},
+            "retrieval_hit": hit(q, fused),
             "rag_value": value,
-            "correct": value is not None and closest_match(value, {q["answer"]}, relative=not q["is_percent"]),
+            "correct": answer_ok(q, value),
             "reply": reply.strip()[:200],
         }
 
@@ -130,15 +140,25 @@ def answer_all(
         return list(pool.map(one, questions))
 
 
+def pct(rows: list[dict], key: str) -> float | None:
+    """Share of `rows` where `key` is truthy, as a percentage."""
+    return round(sum(bool(r[key]) for r in rows) / len(rows) * 100, 1) if rows else None
+
+
 def summary(name: str, rows: list[dict]) -> dict:
     """One summary row for a set."""
-    n = len(rows)
+    facts = [r for r in rows if r["style"] == "factual"]
+    ratios = [r for r in rows if r["style"] == "analytical"]
     return {
         "set": name,
-        "n_questions": n,
-        "rag_answer_correct_pct": round(sum(r["correct"] for r in rows) / n * 100, 1) if n else None,
-        "rag_abstain_pct": round(sum(r["rag_value"] is None for r in rows) / n * 100, 1) if n else None,
-        "retrieval_hit_pct": round(sum(r["retrieval_hit"] for r in rows) / n * 100, 1) if n else None,
+        "n_questions": len(rows),
+        "rag_answer_correct_pct": pct(rows, "correct"),
+        "rag_abstain_pct": round(sum(r["rag_value"] is None for r in rows) / len(rows) * 100, 1) if rows else None,
+        "retrieval_hit_pct": pct(rows, "retrieval_hit"),
+        "rag_fact_correct_pct": pct(facts, "correct"),
+        "rag_analytical_correct_pct": pct(ratios, "correct"),
+        "retrieval_hit_fact_pct": pct(facts, "retrieval_hit"),
+        "retrieval_hit_analytical_pct": pct(ratios, "retrieval_hit"),
     }
 
 
@@ -172,7 +192,7 @@ def main() -> None:
         records = load_real_records(args.real_financials)
         filings = load_real_filings(args.real_dir, records)
         sample = random.Random(args.seed).sample(filings, min(args.real_sample, len(filings)))
-        metrics = load_real_metrics(args.real_financials)
+        metrics = load_xbrl_metrics(args.real_financials)
         chunks, questions = [], []
         for f in sample:
             mine = company_chunks(f.ticker, f.name, f.fiscal_year, f.paths, "real")

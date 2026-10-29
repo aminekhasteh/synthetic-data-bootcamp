@@ -1,19 +1,34 @@
-"""One fixed bank of financial-fact questions, asked the same way of every set.
+"""The one question bank every eval uses: fact questions plus analytical questions,
+asked the same way of every set.
 
-Every company gets the same ten questions, whichever method wrote its filing. The
-answer to each comes from the company's statements (financials.json for a synthetic
-company, XBRL headline figures for a real one), never from the text, so a set that
-never states its revenue still gets the revenue question and scores a miss on it.
-That keeps the denominator fixed at ten per company and makes sets comparable.
+Every company gets the same questions, whichever method wrote its filing: ten fact
+questions (QUESTIONS, a figure the statements report) and six analytical questions
+(ANALYTICAL, a ratio that takes two figures, usually from different statements, e.g.
+return on equity = net income / stockholders' equity). The answer to each comes from
+the company's statements (financials.json for a synthetic company, XBRL headline
+figures for a real one), never from the text, so a set that never states its revenue
+still gets the revenue question and scores a miss on it. That keeps the denominator
+fixed per company and makes sets comparable. evals.section_scorecard,
+evals.rag_answers, evals.compare_sets and RAG.step11_make_qa (data/qa_pairs.csv for
+step12, the dashboard and the chatbot) all build their questions here.
 
-Per question this records the true value and every chunk whose text states it (the
+Per question this records the true value and the chunks that make it answerable (the
 same figure matching as method_2.step09's numeric gate: dollars within 1%, percentages
-within 0.25 points). A question with no such chunk is unanswerable from the corpus.
+within 0.25 points):
+- a fact question: every chunk whose text states the value (gold_chunk_ids);
+- an analytical question: every chunk stating the ratio itself (gold_chunk_ids), and
+  per input figure every chunk stating it (input_gold_chunk_ids, groups split by
+  "|"). It is answerable when the ratio is stated or every input is.
+A question with nothing answerable is unanswerable from the corpus. hit() is the one
+retrieval rule every caller uses: a fact question is hit when a stating chunk is in
+the retrieved list; an analytical one when the ratio's chunk is, or a chunk for every
+input is.
 
-Scores, for a list of questions and the chunks they are searched over:
-- fact_coverage: share of questions whose answer is stated in at least one chunk.
-- fact_recall_at_10: share of questions with a stating chunk in BM25's top 10.
-  Unanswerable questions count as misses, so recall can never exceed coverage.
+Scores, for a list of questions and the chunks they are searched over (score()):
+- fact_coverage / analytical_coverage / qa_coverage: share of the fact, analytical
+  and all questions that are answerable from the chunks.
+- fact_recall_at_10 / analytical_recall_at_10 / qa_recall_at_10: share hit by BM25's
+  top 10. Unanswerable questions count as misses, so recall can't exceed coverage.
 
 And one score on the text itself, label-aware, with no chance matches:
 - fact_correct_pct: of the figures the text attaches to one of the ten facts' labels
@@ -25,9 +40,12 @@ Run from implementations/synthetic_10k; used by evals.section_scorecard and
 evals.compare_sets.
 """
 
+import csv
 import re
 from collections.abc import Iterable
+from pathlib import Path
 
+from method_1.financials import DURATION_METRICS, INSTANT_METRICS
 from method_2.step09_validate_filings import (
     PERCENT_RE,
     PROSE_DOLLAR_RE,
@@ -56,6 +74,48 @@ QUESTIONS: list[tuple[str, str, bool]] = [
     ("net_margin", "What was {name}'s net margin for fiscal {fy}?", True),
     ("operating_margin", "What was {name}'s operating margin for fiscal {fy}?", True),
 ]
+
+# (key, question template, numerator fact, denominator fact). All are percentages of
+# the denominator; the template names the formula so the question is unambiguous.
+ANALYTICAL: list[tuple[str, str, str, str]] = [
+    (
+        "return_on_equity",
+        "What was {name}'s return on equity (net income as a percentage of total stockholders' equity) for fiscal {fy}?",
+        "net_income",
+        "stockholders_equity",
+    ),
+    (
+        "return_on_assets",
+        "What was {name}'s return on assets (net income as a percentage of total assets) for fiscal {fy}?",
+        "net_income",
+        "total_assets",
+    ),
+    (
+        "liabilities_to_assets",
+        "What share of {name}'s total assets were financed by liabilities (total liabilities as a percentage of total assets) at the end of fiscal {fy}?",
+        "total_liabilities",
+        "total_assets",
+    ),
+    (
+        "cash_to_assets",
+        "What percentage of {name}'s total assets was held in cash and cash equivalents at the end of fiscal {fy}?",
+        "cash",
+        "total_assets",
+    ),
+    (
+        "operating_cash_flow_margin",
+        "What was {name}'s operating cash flow margin (cash from operating activities as a percentage of total revenues) for fiscal {fy}?",
+        "operating_cash_flow",
+        "revenue",
+    ),
+    (
+        "cash_conversion",
+        "What was {name}'s cash conversion (cash from operating activities as a percentage of net income) for fiscal {fy}?",
+        "operating_cash_flow",
+        "net_income",
+    ),
+]
+ANALYTICAL_TOLERANCE = 0.5  # percentage points (or 2% of the value, if larger) for a computed ratio
 
 # Leaf names in a synthetic financials.json (either method) for each dollar fact.
 SYNTHETIC_KEYS = {
@@ -150,6 +210,25 @@ def synthetic_facts(financials: dict) -> dict[str, float | None]:
     return with_margins(facts)
 
 
+def load_xbrl_metrics(financials_csv: Path) -> dict[tuple[str, int], dict[str, float]]:
+    """Every XBRL metric in Method 1's financials.csv, per (ticker, fiscal year); {} if
+    the file is missing.
+    """
+    out: dict[tuple[str, int], dict[str, float]] = {}
+    if not financials_csv.exists():
+        return out
+    with open(financials_csv, encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            metrics = {}
+            for m in [*DURATION_METRICS, *INSTANT_METRICS]:
+                try:
+                    metrics[m] = float(row[m])
+                except (KeyError, TypeError, ValueError):
+                    continue
+            out[(row["ticker"], int(row["fiscal_year"]))] = metrics
+    return out
+
+
 def real_facts(xbrl: dict[str, float]) -> dict[str, float | None]:
     """The ten facts from a real filing's XBRL headline figures (Method 1's financials.csv names)."""
     names = {"revenue": "revenue", "stockholders_equity": "stockholders_equity"}
@@ -191,6 +270,16 @@ def stating_chunks(value: float, chunks: Iterable[Chunk], *, is_percent: bool) -
     return ids
 
 
+def analytical_value(facts: dict[str, float | None], numerator: str, denominator: str) -> float | None:
+    """The ratio numerator / denominator * 100, or None when either is missing or the denominator
+    isn't positive (a ratio over negative equity or a net loss means nothing).
+    """
+    top, bottom = facts.get(numerator), facts.get(denominator)
+    if top is None or not bottom or bottom <= 0:
+        return None
+    return top / bottom * 100
+
+
 def make_questions(
     company_id: str,
     name: str,
@@ -198,31 +287,76 @@ def make_questions(
     facts: dict[str, float | None],
     chunks: list[Chunk],
 ) -> list[dict]:
-    """The fixed question bank for one company, with each answer's stating chunks.
+    """The fixed question bank for one company (fact, then analytical), with each
+    answer's stating chunks.
 
-    A fact the statements don't have (a real filing missing an XBRL tag) is skipped;
-    for synthetic companies all ten always exist.
+    A fact the statements don't have (a bank's operating income, a real filing missing
+    an XBRL tag) is skipped, and so is a ratio that needs it.
     """
     rows = []
     by_id = {c.chunk_id: c for c in chunks}
+    gold_by_fact: dict[str, list[str]] = {}
+
+    def row(style: str, fact: str, question: str, value: float, is_percent: bool, gold: list[str], inputs: str) -> dict:
+        items = {by_id[g].item for g in gold} | {
+            by_id[g].item for group in inputs.split("|") for g in group.split(";") if g
+        }
+        return {
+            "company_id": company_id,
+            "fiscal_year": fy,
+            "style": style,
+            "fact": fact,
+            "question": question,
+            "answer": round(value, 2),
+            "is_percent": is_percent,
+            "gold_chunk_ids": ";".join(gold),
+            "input_gold_chunk_ids": inputs,
+            "gold_items": ";".join(sorted(items)),
+        }
+
     for fact, template, is_percent in QUESTIONS:
         value = facts.get(fact)
         if value is None:
             continue
         gold = stating_chunks(value, chunks, is_percent=is_percent)
-        rows.append(
-            {
-                "company_id": company_id,
-                "fiscal_year": fy,
-                "fact": fact,
-                "question": template.format(name=name, fy=fy),
-                "answer": round(value, 2),
-                "is_percent": is_percent,
-                "gold_chunk_ids": ";".join(gold),
-                "gold_items": ";".join(sorted({by_id[g].item for g in gold})),
-            },
-        )
+        gold_by_fact[fact] = gold
+        rows.append(row("factual", fact, template.format(name=name, fy=fy), value, is_percent, gold, ""))
+    for key, template, numerator, denominator in ANALYTICAL:
+        value = analytical_value(facts, numerator, denominator)
+        if value is None:
+            continue
+        direct = stating_chunks(value, chunks, is_percent=True)
+        inputs = "|".join(";".join(gold_by_fact.get(f, [])) for f in (numerator, denominator))
+        rows.append(row("analytical", key, template.format(name=name, fy=fy), value, True, direct, inputs))
     return rows
+
+
+def hit(q: dict, retrieved: Iterable[str] | None) -> bool:
+    """True if `retrieved` (chunk ids; None = every chunk) answers `q`: a chunk stating
+    the answer, or, for an analytical question, a chunk stating each input figure.
+    """
+    pool = None if retrieved is None else set(retrieved)
+
+    def present(ids: str) -> bool:
+        found = [g for g in ids.split(";") if g]
+        return bool(found) if pool is None else any(g in pool for g in found)
+
+    if present(q.get("gold_chunk_ids", "")):
+        return True
+    groups = q.get("input_gold_chunk_ids", "")
+    return bool(groups) and all(present(group) for group in groups.split("|"))
+
+
+def answer_ok(q: dict, value: float | None) -> bool:
+    """True if `value` is the right answer to `q`: within the figure tolerance for a
+    fact, within ANALYTICAL_TOLERANCE points (or 2%) for a computed ratio.
+    """
+    if value is None:
+        return False
+    truth = float(q["answer"])
+    if q.get("style") == "analytical":
+        return abs(value - truth) <= max(ANALYTICAL_TOLERANCE, abs(truth) * 0.02)
+    return closest_match(value, {truth}, relative=not q["is_percent"])
 
 
 def contextual(chunk: Chunk) -> str:
@@ -233,25 +367,27 @@ def contextual(chunk: Chunk) -> str:
 
 
 def score(questions: list[dict], chunks: list[Chunk], k: int = K) -> dict[str, float | int | None]:
-    """fact_coverage and fact_recall_at_k for `questions` searched over `chunks`.
-
-    Only gold chunks among `chunks` count, so scoring one Item's chunks asks: could a
-    retriever over this Item alone answer the standard questions?
+    """Coverage and BM25 recall@k of `questions` over `chunks`, for the fact questions,
+    the analytical ones and all of them (see the module docstring).
     """
-    if not questions:
-        return {"n_questions": 0, "fact_coverage": None, f"fact_recall_at_{k}": None}
     ids = {c.chunk_id for c in chunks}
     bm25 = Bm25Retriever([c.chunk_id for c in chunks], [contextual(c) for c in chunks]) if chunks else None
-    covered = hits = 0
+    out: dict[str, float | int | None] = {"n_questions": len(questions)}
+    tallies = {"fact": [0, 0, 0], "analytical": [0, 0, 0], "qa": [0, 0, 0]}  # n, answerable, hit
     for q in questions:
-        gold = {g for g in q["gold_chunk_ids"].split(";") if g in ids}
-        if not gold:
-            continue
-        covered += 1
-        if bm25 and set(bm25.rank(q["question"])[:k]) & gold:
-            hits += 1
-    n = len(questions)
-    return {"n_questions": n, "fact_coverage": round(covered / n, 3), f"fact_recall_at_{k}": round(hits / n, 3)}
+        groups = ["qa", "fact" if q.get("style", "factual") == "factual" else "analytical"]
+        ok = hit(q, ids)
+        found = ok and bm25 is not None and hit(q, bm25.rank(q["question"])[:k])
+        for g in groups:
+            tallies[g][0] += 1
+            tallies[g][1] += ok
+            tallies[g][2] += found
+    for g, (n, covered, hits) in tallies.items():
+        if g != "qa":
+            out[f"n_{g}_questions"] = n
+        out[f"{g}_coverage"] = round(covered / n, 3) if n else None
+        out[f"{g}_recall_at_{k}"] = round(hits / n, 3) if n else None
+    return out
 
 
 def first_percent(text: str) -> float | None:
