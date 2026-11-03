@@ -4,8 +4,9 @@ reciprocal-rank-fusion hybrid against data/qa_pairs.csv, across three corpus sco
 
 "Real" here means the same 6-company sample data/qa_pairs.csv's real questions come
 from (AEP, BEN, USB, CVS, NOC, CRWD) -- not all 50 real companies, which would mean
-embedding on the order of 500,000 paragraphs. Bounding it to the sample that already
-has hand-verified QA pairs keeps runtime to under a minute. See PLAN.md Phase 9 and
+embedding on the order of 500,000 paragraphs. The questions are the shared standard
+bank (qa.fact_questions via step11: fact and analytical, every question counted, so an
+unanswerable one is a miss), scored with the same hit rule as the scorecard. See PLAN.md Phase 9 and
 RAG.retrieval's module docstring for the semantic retriever itself (fastembed +
 minishlab/potion-retrieval-32M, a static embedding model, not a transformer).
 
@@ -17,16 +18,17 @@ Run from implementations/synthetic_10k (after RAG.step11_make_qa):
 
 import csv
 import io
+import re
 
 from method_2.config import RAW_DIR
 from method_2.utils import setup_logging, write_atomic
+from qa.fact_questions import contextual, hit
 
 from RAG.chunks import Chunk, load_chunks
 from RAG.retrieval import (
     Bm25Retriever,
     SemanticRetriever,
     ndcg_at_k,
-    recall_at_k,
     reciprocal_rank,
     reciprocal_rank_fusion,
 )
@@ -42,8 +44,11 @@ REAL_SAMPLE_TICKERS = {"AEP", "BEN", "USB", "CVS", "NOC", "CRWD"}
 
 
 def load_qa_pairs() -> list[dict]:
+    """The standard bank's questions (fact and analytical); the scenario bank is the
+    chatbot demo's, not comparable across companies, so it isn't scored here.
+    """
     with open(QA_PATH, encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+        return [q for q in csv.DictReader(f) if q.get("bank", "standard") == "standard"]
 
 
 def qa_for(qa_pairs: list[dict], experiment: str) -> list[dict]:
@@ -54,16 +59,24 @@ def qa_for(qa_pairs: list[dict], experiment: str) -> list[dict]:
     return qa_pairs
 
 
+def gold_ids(q: dict) -> set[str]:
+    """Every chunk that helps answer `q`: its stating chunks and its input figures' chunks."""
+    return {g for g in re.split(r"[;|]", f"{q['gold_chunk_ids']};{q['input_gold_chunk_ids']}") if g}
+
+
 def evaluate(qa_pairs: list[dict], rankings_by_qa: dict[str, list[str]], name: str) -> dict:
+    """Recall@k by qa.fact_questions.hit (the rule every eval shares: an unanswerable
+    question is a miss, an analytical one needs each input), MRR and nDCG over gold_ids.
+    """
     n = len(qa_pairs)
     recall5, recall10, rr_sum, ndcg_sum = 0.0, 0.0, 0.0, 0.0
     for q in qa_pairs:
         ranking = rankings_by_qa[q["qa_id"]]
-        gold = {q["gold_chunk_id"]}
-        recall5 += recall_at_k(ranking, gold, 5)
-        recall10 += recall_at_k(ranking, gold, 10)
-        rr_sum += reciprocal_rank(ranking, gold)
-        ndcg_sum += ndcg_at_k(ranking, gold, 10)
+        gold = gold_ids(q)
+        recall5 += hit(q, ranking[:5])
+        recall10 += hit(q, ranking[:10])
+        rr_sum += reciprocal_rank(ranking, gold) if gold else 0.0
+        ndcg_sum += ndcg_at_k(ranking, gold, 10) if gold else 0.0
     return {
         "retriever": name,
         "n_questions": n,
@@ -85,16 +98,17 @@ def load_corpus(experiment: str) -> list[Chunk]:
 
 def run_experiment(experiment: str, all_qa: list[dict]) -> list[dict]:
     chunks = load_corpus(experiment)
-    chunk_id_set = {c.chunk_id for c in chunks}
-    qa_pairs = [q for q in qa_for(all_qa, experiment) if q["gold_chunk_id"] in chunk_id_set]
+    qa_pairs = qa_for(all_qa, experiment)
     if not qa_pairs:
-        logger.warning("%s: no QA pairs with a gold chunk in this corpus scope; skipping", experiment)
+        logger.warning("%s: no QA pairs in this corpus scope; skipping", experiment)
         return []
 
     chunk_ids = [c.chunk_id for c in chunks]
     texts = [c.text for c in chunks]
     logger.info("%s: embedding %d chunks for the semantic retriever", experiment, len(texts))
-    bm25 = Bm25Retriever(chunk_ids, texts)
+    # BM25 indexes each chunk with its company/year/Item prefix, as the scorecard and
+    # evals.rag_answers do; the semantic retriever embeds the raw text (rag_answers).
+    bm25 = Bm25Retriever(chunk_ids, [contextual(c) for c in chunks])
     semantic = SemanticRetriever(chunk_ids, texts)
 
     bm25_rankings, semantic_rankings, hybrid_rankings = {}, {}, {}

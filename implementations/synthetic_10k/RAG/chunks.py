@@ -9,6 +9,12 @@ step10_build_pdfs.tableize() operates on: a financial-statement table's heading 
 its rows have no blank lines between them, so a whole table section (e.g. "Assets"
 plus its balance-sheet rows) falls out as one chunk -- a natural retrieval unit,
 not an arbitrary fixed-size window.
+
+The parsed real filings have no blank lines at all (one line per paragraph or table
+row), so a real Item would otherwise be a single chunk of 10,000+ words. Those files
+are instead packed into ~REAL_CHUNK_WORDS-word chunks of consecutive lines
+(pack_lines). evals.compare_sets uses the same chunk_text, so the scorecard, the RAG
+answers, step11/step12 and the chatbot all see the same passages.
 """
 
 import csv
@@ -19,6 +25,7 @@ from method_2.config import RAW_DIR
 
 
 INDEX_PATH = RAW_DIR.parent / "index.csv"
+REAL_CHUNK_WORDS = 80  # target chunk size when an item file has no blank lines (see pack_lines)
 
 
 @dataclass(frozen=True)
@@ -34,8 +41,34 @@ class Chunk:
 
 
 def chunk_text(text: str) -> list[str]:
-    """Split on blank lines, dropping any empty fragments."""
-    return [p.strip() for p in text.split("\n\n") if p.strip()]
+    """Split on blank lines, dropping any empty fragments; a file with no blank lines
+    (the parsed real filings) is packed line by line instead (pack_lines).
+    """
+    paras = [p.strip() for p in text.split("\n\n") if p.strip()]
+    if len(paras) == 1 and "\n" in paras[0]:
+        paras = pack_lines([line.strip() for line in paras[0].splitlines() if line.strip()])
+    return paras
+
+
+def pack_lines(lines: list[str], target_words: int = REAL_CHUNK_WORDS) -> list[str]:
+    """Join consecutive lines into chunks of about `target_words` words.
+
+    A parsed real filing has one line per paragraph or table row (median 5 words), so
+    single lines are too small to be a passage. Packing them gives chunks near the
+    size of a long synthetic paragraph (synthetic Item 7 paragraphs: median 24 words,
+    90th percentile 57). A line longer than the target stays a chunk of its own.
+    """
+    chunks, current, words = [], [], 0
+    for line in lines:
+        n = len(line.split())
+        if current and words + n > target_words:
+            chunks.append("\n".join(current))
+            current, words = [], 0
+        current.append(line)
+        words += n
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
 
 
 def load_chunks(

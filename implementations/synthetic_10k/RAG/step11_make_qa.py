@@ -1,44 +1,37 @@
-"""Phase 9: build data/qa_pairs.csv, one row per question with an exact answer and a
-gold passage (chunk_id, see RAG.chunks).
+"""Phase 9: build data/qa_pairs.csv from the shared question bank (qa.fact_questions),
+one row per question with an exact answer and its gold passages (chunk ids, see
+RAG.chunks).
 
-Synthetic questions (20 companies): template-based and fully deterministic. Every
-answer is a value already in that company's financials.json or spec.json scenario
-facts; the gold chunk and the exact answer span are found by scanning the company's
-own chunked narrative with the same figure-extraction and tolerance-matching logic
-method_2.step09_validate_filings already uses for the numeric-consistency gate (so a
-financial-fact question's answer is guaranteed to be a verbatim substring of its
-gold chunk by construction, not by a separate check).
+The standard bank ("bank" = "standard") is the same one evals.section_scorecard and
+evals.rag_answers score: for every company, synthetic and real alike, ten fact
+questions (a figure the statements report) and six analytical ones (a ratio of two
+figures, e.g. return on equity = net income / stockholders' equity). Answers come
+from the company's statements (financials.json for the 20 synthetic companies, Method
+1's XBRL extract for the real sample), never from the text; the gold passages are
+every chunk that states the answer, and for an analytical question every chunk that
+states each input figure (gold_chunk_ids, input_gold_chunk_ids). A question with no
+gold passage stays in, so step12 scores it as a miss, as the scorecard does.
 
-Real questions (6 companies): hand-authored from a short, grep-verified excerpt of
-each filing (not the whole filing -- some run to 100,000+ words), matching the
-template-ticker/fiscal-year sample Phase 7's model-judged review already used
-(method_2.step09_validate_filings's docstring). Each answer is checked against the
-actual chunked text before being written out; the script hard-fails if one isn't
-found verbatim, which is what PLAN.md Phase 9 means by "check that each answer span
-appears in the text."
+The scenario bank ("bank" = "scenario") keeps Method 2's scenario questions
+(method_2.step06b_add_scenarios: "why did margins compress?", "what company did it
+acquire?"), grounded by a keyword or phrase search of the company's own narrative.
+Only Method 2's scenario companies have them, so they aren't comparable across sets;
+they feed the chatbot's scenario demo (RAG.chatbot), not the retrieval scores.
 
-A known simplification: each question records exactly one gold_chunk_id, even on
-the rare case where the same figure is restated in more than one chunk (e.g. both a
-prose sentence and a financial-statement table row). Retrieval of the other,
-unrecorded chunk would be scored as a miss. See PLAN.md Phase 9.
-
-Every question carries a `style`: "factual" (a single figure or named entity -- the
-answer is the whole point) or "analytical" (why something happened, or what it
-implies -- the answer is still a short exact span, but finding it requires reading
-a passage that connects a cause to an effect, not just locating a labeled figure).
-Analytical questions are grounded the same way: a chunk search, verified at
-generation time, never a paraphrase. See PLAN.md Phase 9 for which chunks turned out
-to state cause and effect together (no new grounding invented to force this).
+Real questions use the 6-company real sample step12 searches (REAL_SAMPLE): for each,
+the latest fiscal year that has both parsed text and XBRL figures in --real-financials
+(Method 1's financials.csv); a company with neither is skipped with a warning.
 
 Run from implementations/synthetic_10k (after method_2.step03_build_index):
-    uv run python -m RAG.step11_make_qa
+    uv run python -m RAG.step11_make_qa [--real-financials ../../data/sec10k/financials.csv]
 """
 
+import argparse
 import csv
 import io
 import json
 import re
-from typing import Any
+from pathlib import Path
 
 from method_2.config import RAW_DIR
 from method_2.step09_validate_filings import (
@@ -49,6 +42,7 @@ from method_2.step09_validate_filings import (
     to_float,
 )
 from method_2.utils import setup_logging, write_atomic
+from qa.fact_questions import load_xbrl_metrics, make_questions, real_facts, synthetic_facts
 
 from RAG.chunks import Chunk, load_chunks
 
@@ -57,18 +51,25 @@ logger = setup_logging("make_qa")
 
 SYNTHETIC_DIR = RAW_DIR.parent / "synthetic"
 QA_PATH = RAW_DIR.parent / "qa_pairs.csv"
-QA_FIELDS = ["qa_id", "source", "ticker", "fiscal_year", "item", "style", "question", "answer", "gold_chunk_id"]
-
-# (path through financials.json, question template, is_percent)
-FINANCIAL_FACTS = [
-    (("income_statement", "revenues"), "What were {name}'s total revenues for fiscal {fy}?", False),
-    (("income_statement", "net_income"), "What was {name}'s net income for fiscal {fy}?", False),
-    (
-        ("balance_sheet", "assets", "total_assets"),
-        "What were {name}'s total assets as of the end of fiscal {fy}?",
-        False,
-    ),
+QA_FIELDS = [
+    "qa_id",
+    "source",
+    "bank",
+    "ticker",
+    "fiscal_year",
+    "item",
+    "style",
+    "fact",
+    "question",
+    "answer",
+    "gold_chunk_id",
+    "gold_chunk_ids",
+    "input_gold_chunk_ids",
+    "is_percent",
 ]
+DEFAULT_REAL_FINANCIALS = RAW_DIR.parents[4] / "data" / "sec10k" / "financials.csv"
+# The real companies step12's real and mixed scopes search (RAG.step12's REAL_SAMPLE_TICKERS).
+REAL_SAMPLE = ["AEP", "BEN", "USB", "CVS", "NOC", "CRWD"]
 
 # One "why" question per keyword-grounded scenario type (method_2.step06b_add_scenarios),
 # phrased so answering it requires reading the passage that connects the scenario's
@@ -105,86 +106,6 @@ SEVERITY_PHRASE_QUESTIONS = {
 # same as every other grounding in this file.
 ACQUISITION_RISK_PHRASE = "may not realize the anticipated benefits"
 PRODUCT_LAUNCH_RISK_PHRASE = "may not realize the expected benefits"
-
-# Hand-authored from the real company behind each sampled fictional company's template
-# (ticker, fiscal_year) -- the same 6-company sample used for Phase 7's model-judged
-# review. Each answer is a short, grep-verified verbatim excerpt, not a paraphrase.
-REAL_QA = [
-    ("AEP", 2025, "1", "How many employees did AEP's subsidiaries have as of December 31, 2025?", "17,581 employees"),
-    (
-        "AEP",
-        2025,
-        "1",
-        "In what year was American Electric Power incorporated, and in which state?",
-        "incorporated under the laws of the State of New York in 1906",
-    ),
-    (
-        "BEN",
-        2024,
-        "7",
-        "What was Franklin Resources' total assets under management (AUM) at September 30, 2024?",
-        "$1,678.6 billion",
-    ),
-    (
-        "BEN",
-        2024,
-        "7",
-        "How much did Franklin Resources' AUM growth reflect from the acquisition of Putnam Investments?",
-        "$148.3 billion from the acquisition of Putnam Investments",
-    ),
-    (
-        "USB",
-        2025,
-        "7",
-        "How much net income did U.S. Bancorp earn in 2025 compared with 2024?",
-        "$7.6 billion in 2025 compared with $6.3 billion in 2024",
-    ),
-    (
-        "USB",
-        2025,
-        "7",
-        "What was U.S. Bancorp's diluted earnings per common share in 2025, and how much did it increase from 2024?",
-        "$4.62 in 2025, representing a 21.9 percent increase",
-    ),
-    (
-        "CVS",
-        2024,
-        "7",
-        "How many retail locations did CVS Health have as of December 31, 2024?",
-        "more than 9,000 retail locations",
-    ),
-    (
-        "CVS",
-        2024,
-        "7",
-        "Approximately how many pharmacy benefits manager plan members did CVS Health serve?",
-        "approximately 90 million plan members",
-    ),
-    (
-        "NOC",
-        2025,
-        "7",
-        "How much cash did Northrop Grumman receive for the sale of its Immersive Mission Solutions (IMS) operating unit?",
-        "$333 million in cash",
-    ),
-    (
-        "NOC",
-        2025,
-        "7",
-        "When did Northrop Grumman complete the divestiture of its training services business?",
-        "May 24, 2025",
-    ),
-    ("CRWD", 2025, "1", "In what year was CrowdStrike founded?", "Founded in 2011"),
-    ("CRWD", 2025, "7", "On what date does CrowdStrike's fiscal year end?", "fiscal years ended January 31, 2025"),
-]
-
-
-def get_field(d: Any, path: tuple[str, ...]) -> float | None:
-    for key in path:
-        if key not in d:
-            return None
-        d = d[key]
-    return float(d)
 
 
 def extract_answer_token(ctx: str, target_value: float, *, is_percent: bool) -> str:
@@ -359,107 +280,104 @@ def scenario_qa_rows(spec: dict, company_chunks: list[Chunk]) -> list[dict]:
     return rows
 
 
-def synthetic_qa_rows(spec_path, all_chunks: list[Chunk]) -> list[dict]:
+def format_answer(value: float, *, is_percent: bool) -> str:
+    """An answer as the dashboard shows it."""
+    return f"{value:.2f}%" if is_percent else f"${value / 1e6:,.1f} million"
+
+
+def standard_rows(source: str, ticker: str, name: str, fy: int, facts: dict, chunks: list[Chunk]) -> list[dict]:
+    """The standard bank for one company as qa_pairs rows."""
+    by_id = {c.chunk_id: c for c in chunks}
+    rows = []
+    for q in make_questions(ticker, name, fy, facts, chunks):
+        first = next((g for g in q["gold_chunk_ids"].split(";") if g), None) or next(
+            (g for g in re.split(r"[;|]", q["input_gold_chunk_ids"]) if g),
+            "",
+        )
+        row = qa_row(
+            source,
+            ticker,
+            fy,
+            by_id[first].item if first else "",
+            q["style"],
+            q["question"],
+            format_answer(q["answer"], is_percent=q["is_percent"]),
+            first,
+        )
+        row.update(
+            bank="standard",
+            fact=q["fact"],
+            gold_chunk_ids=q["gold_chunk_ids"],
+            input_gold_chunk_ids=q["input_gold_chunk_ids"],
+            is_percent=q["is_percent"],
+        )
+        rows.append(row)
+    return rows
+
+
+def synthetic_qa_rows(spec_path: Path, all_chunks: list[Chunk]) -> list[dict]:
+    """The standard bank and the scenario questions for one synthetic company."""
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     financials = json.loads((spec_path.parent / "financials.json").read_text(encoding="utf-8"))
     ticker, fy, name = spec["fictional_id"], spec["fiscal_year"], spec["fictional_name"]
     company_chunks = [c for c in all_chunks if c.source == "synthetic" and c.ticker == ticker and c.fiscal_year == fy]
-
-    rows = []
-    for path, template, is_percent in FINANCIAL_FACTS:
-        value = get_field(financials, path)
-        if value is None:
-            continue
-        found = find_figure_chunk(value, company_chunks, is_percent=is_percent)
-        if found:
-            chunk, answer = found
-            rows.append(
-                qa_row(
-                    "synthetic",
-                    ticker,
-                    fy,
-                    chunk.item,
-                    "factual",
-                    template.format(name=name, fy=fy),
-                    answer,
-                    chunk.chunk_id,
-                ),
-            )
-
-    revenue = get_field(financials, ("income_statement", "revenues"))
-    net_income = get_field(financials, ("income_statement", "net_income"))
-    operating_income = financials["income_statement"].get("operating_income")
-    if revenue:
-        found = (
-            find_figure_chunk(net_income / revenue * 100, company_chunks, is_percent=True)
-            if net_income is not None
-            else None
-        )
-        if found:
-            chunk, answer = found
-            rows.append(
-                qa_row(
-                    "synthetic",
-                    ticker,
-                    fy,
-                    chunk.item,
-                    "factual",
-                    f"What was {name}'s net margin for fiscal {fy}?",
-                    answer,
-                    chunk.chunk_id,
-                ),
-            )
-        if operating_income is not None:
-            found = find_figure_chunk(operating_income / revenue * 100, company_chunks, is_percent=True)
-            if found:
-                chunk, answer = found
-                question = f"What was {name}'s operating margin for fiscal {fy}?"
-                rows.append(qa_row("synthetic", ticker, fy, chunk.item, "factual", question, answer, chunk.chunk_id))
-
-    rows.extend(scenario_qa_rows(spec, company_chunks))
+    rows = standard_rows("synthetic", ticker, name, fy, synthetic_facts(financials), company_chunks)
+    rows.extend({**r, "bank": "scenario"} for r in scenario_qa_rows(spec, company_chunks))
     return rows
 
 
-def real_qa_rows(chunks: list[Chunk]) -> list[dict]:
-    by_key: dict[tuple[str, int, str], list[Chunk]] = {}
-    for c in chunks:
-        by_key.setdefault((c.ticker, c.fiscal_year, c.item), []).append(c)
-
+def real_qa_rows(chunks: list[Chunk], financials_csv: Path) -> list[dict]:
+    """The standard bank for each REAL_SAMPLE filing, from its XBRL figures."""
+    metrics = load_xbrl_metrics(financials_csv)
+    if not metrics:
+        logger.warning("No XBRL figures in %s; no real questions", financials_csv)
+        return []
     rows = []
-    for ticker, fy, item, question, answer in REAL_QA:
-        candidates = by_key.get((ticker, fy, item), [])
-        chunk = next((c for c in candidates if answer in c.text), None)
-        if chunk is None:
-            raise SystemExit(f"Real QA answer not found verbatim: {ticker} FY{fy} item {item}: {answer!r}")
-        rows.append(qa_row("real", ticker, fy, item, "factual", question, answer, chunk.chunk_id))
+    for ticker in REAL_SAMPLE:
+        years = {c.fiscal_year for c in chunks if c.ticker == ticker} & {y for t, y in metrics if t == ticker}
+        if not years:
+            logger.warning("No real filing with both text and XBRL figures for %s; skipped", ticker)
+            continue
+        fy = max(years)
+        mine = [c for c in chunks if c.ticker == ticker and c.fiscal_year == fy]
+        rows.extend(
+            standard_rows("real", ticker, mine[0].company_name, fy, real_facts(metrics.get((ticker, fy), {})), mine),
+        )
     return rows
 
 
 def main() -> None:
-    """Build data/qa_pairs.csv from the synthetic corpus and a 6-company real sample."""
-    synthetic_chunks = load_chunks(sources={"synthetic"})
+    """Build data/qa_pairs.csv from the synthetic corpus and the real sample."""
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--real-financials",
+        type=Path,
+        default=DEFAULT_REAL_FINANCIALS,
+        help="Method 1's financials.csv",
+    )
+    args = parser.parse_args()
 
+    synthetic_chunks = load_chunks(sources={"synthetic"})
     rows = []
     for spec_path in sorted(SYNTHETIC_DIR.glob("*/*/spec.json")):
         rows.extend(synthetic_qa_rows(spec_path, synthetic_chunks))
-
-    real_sample_tickers = {ticker for ticker, *_ in REAL_QA}
-    real_chunks = load_chunks(sources={"real"}, tickers=real_sample_tickers)
-    rows.extend(real_qa_rows(real_chunks))
+    real_chunks = load_chunks(sources={"real"}, tickers=set(REAL_SAMPLE))
+    rows.extend(real_qa_rows(real_chunks, args.real_financials))
 
     for i, row in enumerate(rows):
         row["qa_id"] = f"qa_{i:04d}"
 
-    buffer_rows = [{field: row[field] for field in QA_FIELDS} for row in rows]
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=QA_FIELDS)
     writer.writeheader()
-    writer.writerows(buffer_rows)
+    writer.writerows([{field: row.get(field, "") for field in QA_FIELDS} for row in rows])
     write_atomic(QA_PATH, buffer.getvalue())
 
-    n_synthetic = sum(1 for r in rows if r["source"] == "synthetic")
-    n_real = sum(1 for r in rows if r["source"] == "real")
-    logger.info("Wrote %d QA pairs to %s (%d synthetic, %d real)", len(rows), QA_PATH, n_synthetic, n_real)
+    counts = {}
+    for r in rows:
+        key = f"{r['source']}/{r['bank']}/{r['style']}"
+        counts[key] = counts.get(key, 0) + 1
+    logger.info("Wrote %d QA pairs to %s: %s", len(rows), QA_PATH, counts)
 
 
 if __name__ == "__main__":

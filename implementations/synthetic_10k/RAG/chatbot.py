@@ -206,7 +206,13 @@ def load_scenario_info() -> dict[str, dict]:
 def load_analytical_qa() -> list[dict]:
     with open(QA_PATH, encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
-    return [r for r in rows if r["style"] == "analytical" and r["source"] == "synthetic"]
+    # The scenario bank's "why" questions (RAG.step11_make_qa); the standard bank's
+    # analytical ratios are scored by step12 and the scorecard, not demoed here.
+    return [
+        r
+        for r in rows
+        if r["style"] == "analytical" and r["source"] == "synthetic" and r.get("bank", "scenario") == "scenario"
+    ]
 
 
 def demo_rows(

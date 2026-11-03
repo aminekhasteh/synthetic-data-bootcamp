@@ -30,6 +30,7 @@ Run from implementations/synthetic_10k (after step09, step11, step12, step13, st
 
 import csv
 import json
+import re
 from pathlib import Path
 
 from method_2.config import RAW_DIR
@@ -66,11 +67,41 @@ def load_csv(filename: str) -> list[dict]:
         return list(csv.DictReader(f))
 
 
-def load_csv_optional(filename: str) -> list[dict]:
-    """Like load_csv, but a missing file is a warning, not a crash."""
-    if not (DATA_DIR / filename).exists():
-        logger.warning("%s not found; run `uv run python -m evals.llm_judge` to populate that card", filename)
+def embedded_rows(key: str) -> list[dict]:
+    """The `key` rows already embedded in the current dashboard/index.html, or []."""
+    if not OUTPUT_PATH.exists():
         return []
+    m = re.search(
+        r"window\.__DASHBOARD_DATA__ = (\{.*?\});\n</script>",
+        OUTPUT_PATH.read_text(encoding="utf-8"),
+        re.DOTALL,
+    )
+    if not m:
+        return []
+    try:
+        return json.loads(m.group(1).replace("<\\/script", "</script")).get(key, [])
+    except json.JSONDecodeError:
+        return []
+
+
+def load_csv_optional(key: str, filename: str) -> list[dict]:
+    """Like load_csv, but a missing file is a warning, not a crash: the rows already
+    embedded in index.html are kept (the LLM judge's CSV stays on the machine that ran
+    it, so a rebuild elsewhere would otherwise blank its card).
+    """
+    if not (DATA_DIR / filename).exists():
+        kept = embedded_rows(key)
+        if kept:
+            logger.warning(
+                "%s not found; keeping the %d %s rows already in %s",
+                filename,
+                len(kept),
+                key,
+                OUTPUT_PATH.name,
+            )
+        else:
+            logger.warning("%s not found; run `uv run python -m evals.llm_judge` to populate that card", filename)
+        return kept
     return load_csv(filename)
 
 
@@ -84,7 +115,7 @@ def main() -> None:
 
     d3_source = VENDOR_D3_PATH.read_text(encoding="utf-8")
     data = {key: load_csv(filename) for key, filename in DATASETS.items()}
-    data.update({key: load_csv_optional(filename) for key, filename in OPTIONAL_DATASETS.items()})
+    data.update({key: load_csv_optional(key, filename) for key, filename in OPTIONAL_DATASETS.items()})
 
     # `</script` inside a JSON string (or, in principle, the vendored d3 source)
     # would otherwise close this script tag early -- the HTML parser doesn't know
